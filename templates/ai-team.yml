@@ -1,0 +1,70 @@
+# Put this file in every project as .github/workflows/ai-team.yml
+# (setup script does it automatically)
+name: AI Team
+
+on:
+  issues:
+    types: [labeled]
+  issue_comment:
+    types: [created]
+  pull_request_review_comment:
+    types: [created]
+  schedule:
+    - cron: "0 0 * * *" # 03:00 Moscow time
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Mode"
+        type: choice
+        options: [court, office, full, nightly]
+        default: full
+      issue:
+        description: "Issue number (empty for nightly)"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+  id-token: write
+  actions: read
+
+jobs:
+  labeled:
+    if: github.event_name == 'issues' && contains(fromJSON('["court","office","full"]'), github.event.label.name)
+    uses: GermanDOK/ai-team/.github/workflows/team.yml@main
+    with:
+      mode: ${{ github.event.label.name }}
+      issue_number: ${{ format('{0}', github.event.issue.number) }}
+      team_repo: GermanDOK/ai-team
+    secrets:
+      CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+
+  mention:
+    if: (github.event_name == 'issue_comment' || github.event_name == 'pull_request_review_comment') && contains(github.event.comment.body, '@claude')
+    uses: GermanDOK/ai-team/.github/workflows/team.yml@main
+    with:
+      mode: mention
+      team_repo: GermanDOK/ai-team
+    secrets:
+      CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+
+  nightly:
+    if: github.event_name == 'schedule'
+    uses: GermanDOK/ai-team/.github/workflows/team.yml@main
+    with:
+      mode: nightly
+      team_repo: GermanDOK/ai-team
+    secrets:
+      CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+
+  manual:
+    if: github.event_name == 'workflow_dispatch'
+    uses: GermanDOK/ai-team/.github/workflows/team.yml@main
+    with:
+      mode: ${{ inputs.mode }}
+      issue_number: ${{ inputs.issue }}
+      team_repo: GermanDOK/ai-team
+    secrets:
+      CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}

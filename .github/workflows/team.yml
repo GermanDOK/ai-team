@@ -1,0 +1,113 @@
+# Reusable workflow: runs the AI team (council + office) inside any project repo.
+# Project repos call it from .github/workflows/ai-team.yml (see templates/ai-team.yml).
+name: AI Team (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      mode:
+        description: "court | office | full | nightly | mention"
+        required: true
+        type: string
+      issue_number:
+        required: false
+        type: string
+        default: ""
+      team_repo:
+        description: "owner/name of the ai-team repo"
+        required: false
+        type: string
+        default: "GermanDOK/ai-team"
+    secrets:
+      CLAUDE_CODE_OAUTH_TOKEN:
+        required: true
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    concurrency:
+      group: ai-team-${{ github.repository }}-${{ inputs.issue_number || inputs.mode }}
+      cancel-in-progress: false
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Checkout project
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Checkout ai-team
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.team_repo }}
+          path: .ai-team-src
+
+      - name: Install agents and commands
+        run: |
+          mkdir -p "$HOME/.claude"
+          cp -r .ai-team-src/agents "$HOME/.claude/"
+          cp -r .ai-team-src/commands "$HOME/.claude/"
+          rm -rf .ai-team-src
+          git config user.name "ai-team[bot]"
+          git config user.email "ai-team@users.noreply.github.com"
+
+      - name: Pick task from queue (nightly)
+        id: pick
+        if: inputs.mode == 'nightly'
+        run: |
+          N=$(gh issue list --label queue --state open --limit 200 --json number --jq 'map(.number) | sort | .[0] // empty')
+          echo "issue=$N" >> "$GITHUB_OUTPUT"
+          if [ -z "$N" ]; then echo "Queue is empty — nothing to do."; fi
+
+      - name: Resolve task
+        id: task
+        if: inputs.mode != 'mention'
+        run: |
+          N="${{ inputs.issue_number }}"
+          if [ -z "$N" ]; then N="${{ steps.pick.outputs.issue }}"; fi
+          MODE="${{ inputs.mode }}"
+          if [ "$MODE" = "nightly" ]; then MODE="full"; fi
+          echo "issue=$N" >> "$GITHUB_OUTPUT"
+          echo "mode=$MODE" >> "$GITHUB_OUTPUT"
+          if [ -n "$N" ]; then gh issue edit "$N" --add-label in-progress || true; fi
+
+      - name: "@claude mention"
+        if: inputs.mode == 'mention'
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          claude_args: --max-turns 60
+
+      - name: Run AI team
+        if: inputs.mode != 'mention' && steps.task.outputs.issue != ''
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          claude_args: >-
+            --max-turns 150
+            --allowedTools "Bash,Read,Edit,Write,Glob,Grep,Task,Agent,WebSearch,WebFetch,TodoWrite"
+          prompt: |
+            You are running UNATTENDED in GitHub Actions on repo ${{ github.repository }}. Nobody can answer questions live.
+
+            Task source: GitHub issue #${{ steps.task.outputs.issue }}.
+            Read it first: `gh issue view ${{ steps.task.outputs.issue }} --comments`.
+            Mode: ${{ steps.task.outputs.mode }}.
+
+            Follow the procedure in `~/.claude/commands/${{ steps.task.outputs.mode }}.md` exactly, using the issue title + body (+ relevant comments) as $ARGUMENTS.
+            The subagents (council-*, office-*) are installed in ~/.claude/agents/.
+
+            Delivery rules:
+            - Never push to main/master. Use branch `ai/${{ steps.task.outputs.issue }}-<short-slug>`.
+            - Mode court: post the verdict summary as a comment on the issue (in Russian). Also push the decision file on the branch and open a DRAFT PR titled "Решение совета: <idea>" so the record can be merged.
+            - Mode office / full: push the branch and open a PR with `Closes #${{ steps.task.outputs.issue }}`. PR description in Russian: what was done, QA verdict, security verdict, what the owner should check.
+            - Always finish by commenting on the issue in Russian: 3-6 lines + PR link.
+            - If the task is truly ambiguous or blocked, do not guess big: comment your question on the issue, add label `needs-owner`, and stop.
+            - Never print or commit secrets.
+
+      - name: Update labels
+        if: always() && inputs.mode != 'mention' && steps.task.outputs.issue != ''
+        run: |
+          N="${{ steps.task.outputs.issue }}"
+          gh issue edit "$N" --remove-label in-progress --remove-label queue --remove-label court --remove-label office --remove-label full || true
+          gh issue edit "$N" --add-label in-review || true
